@@ -1,3 +1,4 @@
+
 import { Toaster } from "@/components/ui/toaster";
 import { Toaster as Sonner } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -9,7 +10,7 @@ import DashboardLayout from "./components/Layout/Dashboard";
 import Leads from "./pages/Leads";
 import Analytics from "./pages/Analytics";
 import Settings from "./pages/Settings";
-import Conversations from "./pages/Conversations";
+import Conversations from "./pages/Conversations";  // Ensure this import is correct
 
 // Create a client
 const queryClient = new QueryClient();
