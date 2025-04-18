@@ -1,218 +1,481 @@
-
 import React, { useState, useEffect } from 'react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Button } from '@/components/ui/button';
-import ChatWidget from '@/components/ChatWidget/ChatWidget';
 import AnalyticsCard from '@/components/Analytics/AnalyticsCard';
-import { MessageSquare, Users, BarChart3, ArrowUpRight } from 'lucide-react';
+import { MessageSquare, Users, BarChart3, ArrowUpRight, PercentSquare, Clock, Globe, AlertCircle, Loader2 } from 'lucide-react';
 import { Link } from 'react-router-dom';
-import { fetchLeads, fetchAnalytics } from '@/services/mock-data';
-import { Analytics, Lead } from '@/types';
+import { supabase } from '@/lib/supabaseClient';
+import { Lead, Conversation } from '@/types';
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, PieChart, Pie, Cell } from 'recharts';
+
+// Helper function to format date as 'YYYY-MM-DD'
+const formatDate = (date: Date): string => {
+    return date.toISOString().split('T')[0];
+};
+
+// Interface for daily lead data
+interface DailyLeadData {
+  name: string; // Date string (e.g., 'Mon', 'Tue' or 'YYYY-MM-DD')
+  leads: number;
+  conversations: number; // Added for tracking both metrics
+}
+
+// Interface for country/region data
+interface CountryDataPoint {
+  name: string;
+  value: number;
+}
+
+const COLORS = ['#0088FE', '#00C49F', '#FFBB28', '#FF8042', '#8884D8'];
 
 const Dashboard = () => {
-  const [leads, setLeads] = useState<Lead[]>([]);
-  const [analytics, setAnalytics] = useState<Analytics | null>(null);
+  const [recentLeads, setRecentLeads] = useState<Lead[]>([]);
+  const [recentConversations, setRecentConversations] = useState<Conversation[]>([]);
+  const [totalConversations, setTotalConversations] = useState<number | null>(null);
+  const [totalLeads, setTotalLeads] = useState<number | null>(null);
+  const [averageDuration, setAverageDuration] = useState<number | null>(null);
+  const [conversionRate, setConversionRate] = useState<string>('0%');
+  const [dailyLeadsData, setDailyLeadsData] = useState<DailyLeadData[]>([]); // State for chart data
+  const [countryData, setCountryData] = useState<CountryDataPoint[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     const loadData = async () => {
       setIsLoading(true);
+      setError(null);
       try {
-        const [leadsData, analyticsData] = await Promise.all([
-          fetchLeads(),
-          fetchAnalytics()
+        // Calculate the date 7 days ago
+        const sevenDaysAgo = new Date();
+        sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+        const sevenDaysAgoISOString = sevenDaysAgo.toISOString();
+
+        // Fetch recent leads, total conversations, total leads, and leads from the last 7 days
+        const [recentLeadsResult, convCountResult, totalLeadsResult, weeklyLeadsResult, recentConvResult, weeklyConvResult] = await Promise.all([
+          supabase
+            .from('leads')
+            .select('id, name, email, interest, created_at, status')
+            .order('created_at', { ascending: false })
+            .limit(5),
+          supabase
+            .from('conversations')
+            .select('id, created_at, updated_at', { count: 'exact', head: false }),
+          supabase
+            .from('leads')
+            .select('id', { count: 'exact', head: true }),
+          supabase // Fetch leads for the chart
+            .from('leads')
+            .select('id, created_at')
+            .gte('created_at', sevenDaysAgoISOString) // Filter by date
+            .order('created_at', { ascending: true }),
+          supabase // Fetch recent conversations
+            .from('conversations')
+            .select('id, thread_id, created_at, updated_at, metadata, channel, country_code, city') // Fetch required and desired optional fields
+            .order('created_at', { ascending: false })
+            .limit(5),
+          supabase // Fetch weekly conversations
+            .from('conversations')
+            .select('id, created_at')
+            .gte('created_at', sevenDaysAgoISOString)
+            .order('created_at', { ascending: true })
         ]);
+
+        if (recentLeadsResult.error) throw new Error(`Recent leads fetch error: ${recentLeadsResult.error.message}`);
+        if (convCountResult.error) throw new Error(`Conversations count error: ${convCountResult.error.message}`);
+        if (totalLeadsResult.error) throw new Error(`Total leads count error: ${totalLeadsResult.error.message}`);
+        if (weeklyLeadsResult.error) throw new Error(`Weekly leads fetch error: ${weeklyLeadsResult.error.message}`);
+        if (recentConvResult.error) throw new Error(`Recent conversations fetch error: ${recentConvResult.error.message}`);
+        if (weeklyConvResult.error) throw new Error(`Weekly conversations fetch error: ${weeklyConvResult.error.message}`);
+
+        setRecentLeads(recentLeadsResult.data || []);
+        setRecentConversations((recentConvResult.data as Conversation[]) || []);
+        setTotalLeads(totalLeadsResult.count ?? 0);
+        setTotalConversations(convCountResult.count ?? 0);
+
+        // Calculate conversion rate
+        const convCount = convCountResult.count ?? 0;
+        const leadsCount = totalLeadsResult.count ?? 0;
         
-        setLeads(leadsData);
-        setAnalytics(analyticsData);
-      } catch (error) {
-        console.error('Error loading dashboard data:', error);
+        if (convCount > 0) {
+          const rate = (leadsCount / convCount) * 100;
+          setConversionRate(`${rate.toFixed(1)}%`);
+        } else {
+          setConversionRate('0%');
+        }
+
+        // Calculate average conversation duration
+        const convData = convCountResult.data as any[] || [];
+        if (convData && convData.length > 0) {
+          let totalDurationMinutes = 0;
+          let validConversationsCount = 0;
+
+          convData.forEach(conv => {
+            if (conv.created_at && conv.updated_at) {
+              try {
+                const startTime = new Date(conv.created_at).getTime();
+                const endTime = new Date(conv.updated_at).getTime();
+                const durationMs = endTime - startTime;
+                
+                if (durationMs > 0) {
+                  totalDurationMinutes += durationMs / (1000 * 60);
+                  validConversationsCount++;
+                }
+              } catch (parseError) {
+                console.warn("Error parsing conversation dates:", parseError);
+              }
+            }
+          });
+
+          if (validConversationsCount > 0) {
+            const avg = totalDurationMinutes / validConversationsCount;
+            setAverageDuration(parseFloat(avg.toFixed(1)));
+          } else {
+            setAverageDuration(0);
+          }
+        } else {
+          setAverageDuration(0);
+        }
+
+        // Process weekly leads and conversations for the chart
+        const leadsByDay: { [key: string]: number } = {};
+        const convByDay: { [key: string]: number } = {};
+        const dateMap: { [key: string]: string } = {}; // To store formatted date names
+
+        // Initialize the last 7 days
+        for (let i = 0; i < 7; i++) {
+          const date = new Date();
+          date.setDate(date.getDate() - i);
+          const dateString = formatDate(date);
+          leadsByDay[dateString] = 0;
+          convByDay[dateString] = 0;
+          // Format date for display
+          dateMap[dateString] = date.toLocaleDateString(undefined, { weekday: 'short' });
+        }
+
+        // Count leads per day
+        (weeklyLeadsResult.data || []).forEach(lead => {
+          if (lead.created_at) {
+            const leadDate = new Date(lead.created_at);
+            const dateString = formatDate(leadDate);
+            if (leadsByDay.hasOwnProperty(dateString)) {
+              leadsByDay[dateString]++;
+            }
+          }
+        });
+
+        // Count conversations per day
+        (weeklyConvResult.data || []).forEach(conv => {
+          if (conv.created_at) {
+            const convDate = new Date(conv.created_at);
+            const dateString = formatDate(convDate);
+            if (convByDay.hasOwnProperty(dateString)) {
+              convByDay[dateString]++;
+            }
+          }
+        });
+
+        // Format data for recharts, ensuring chronological order
+        const formattedChartData = Object.keys(leadsByDay)
+          .sort() // Sort keys (YYYY-MM-DD) chronologically
+          .map(dateString => ({
+            name: dateMap[dateString], // Use the formatted name (e.g., 'Mon')
+            leads: leadsByDay[dateString],
+            conversations: convByDay[dateString],
+          }));
+
+        setDailyLeadsData(formattedChartData);
+
+        // Prepare country/region data
+        const countryCounts: { [key: string]: number } = {};
+        (recentConvResult.data || []).forEach(conv => {
+          const country = conv.country_code || 'Unknown';
+          countryCounts[country] = (countryCounts[country] || 0) + 1;
+        });
+        
+        const countryDataPoints = Object.entries(countryCounts)
+          .map(([name, value]) => ({ name, value }))
+          .sort((a, b) => b.value - a.value)
+          .slice(0, 5);  // Limit to top 5 countries
+        
+        setCountryData(countryDataPoints);
+
+      } catch (err: any) {
+        console.error('Error loading dashboard data:', err);
+        setError(`Failed to load dashboard data: ${err.message || 'Unknown error'}`);
       } finally {
         setIsLoading(false);
       }
     };
-    
+
     loadData();
   }, []);
+
+  useEffect(() => {
+    console.log("Dashboard data:", {
+      totalConversations,
+      totalLeads,
+      isLoading,
+      hasData: dailyLeadsData.length > 0,
+      hasCountryData: countryData.length > 0,
+      error
+    });
+  }, [totalConversations, totalLeads, isLoading, dailyLeadsData, countryData, error]);
 
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <h1 className="text-3xl font-bold">Dashboard</h1>
-        
-        {/* Demo chatbot widget */}
-        <div className="flex items-center gap-2">
-          <span className="text-sm text-muted-foreground">Live Preview:</span>
-          <ChatWidget 
-            themeColor="#10b981"
-            botName="LeadSpark"
-            collectLeadAfter={2}
-            onLeadCollected={(data) => console.log('Lead collected:', data)}
-          />
-        </div>
       </div>
+
+      {error && (
+          <Alert variant="destructive" className="mt-4">
+              <AlertCircle className="h-4 w-4" />
+              <AlertTitle>Error Loading Data</AlertTitle>
+              <AlertDescription>{error}</AlertDescription>
+          </Alert>
+      )}
       
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Total Conversations</CardTitle>
-            <MessageSquare className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">
-              {isLoading ? '...' : analytics?.totalConversations || 0}
-            </div>
-            <p className="text-xs text-muted-foreground">
-              +12% from last month
-            </p>
-          </CardContent>
-        </Card>
+      {/* KPI Cards (4 in a row with additional metrics) */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
+        <Link to="/conversations" className="hover:shadow-md rounded-lg transition-shadow">
+          <Card>
+            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+              <CardTitle className="text-sm font-medium">Total Conversations</CardTitle>
+              <MessageSquare className="h-4 w-4 text-muted-foreground" />
+            </CardHeader>
+            <CardContent>
+              <div className="text-2xl font-bold">
+                {isLoading ? <Loader2 className="h-5 w-5 animate-spin"/> : totalConversations ?? '-'}
+              </div>
+              <p className="text-xs text-muted-foreground">View all conversations</p>
+            </CardContent>
+          </Card>
+        </Link>
         
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Leads Generated</CardTitle>
-            <Users className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">
-              {isLoading ? '...' : analytics?.totalLeads || 0}
-            </div>
-            <p className="text-xs text-muted-foreground">
-              +18% from last month
-            </p>
-          </CardContent>
-        </Card>
+        <Link to="/leads" className="hover:shadow-md rounded-lg transition-shadow">
+          <Card>
+            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+              <CardTitle className="text-sm font-medium">Leads Generated</CardTitle>
+              <Users className="h-4 w-4 text-muted-foreground" />
+            </CardHeader>
+            <CardContent>
+              <div className="text-2xl font-bold">
+                {isLoading ? <Loader2 className="h-5 w-5 animate-spin"/> : totalLeads ?? '-'}
+              </div>
+              <p className="text-xs text-muted-foreground">View all leads</p>
+            </CardContent>
+          </Card>
+        </Link>
         
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
             <CardTitle className="text-sm font-medium">Conversion Rate</CardTitle>
-            <BarChart3 className="h-4 w-4 text-muted-foreground" />
+            <PercentSquare className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
             <div className="text-2xl font-bold">
-              {isLoading ? '...' : `${analytics?.conversionRate || 0}%`}
+              {isLoading ? <Loader2 className="h-5 w-5 animate-spin"/> : conversionRate}
             </div>
-            <p className="text-xs text-muted-foreground">
-              +5% from last month
-            </p>
+            <p className="text-xs text-muted-foreground">Leads / Conversations</p>
+          </CardContent>
+        </Card>
+        
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium">Avg. Conversation</CardTitle>
+            <Clock className="h-4 w-4 text-muted-foreground" />
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold">
+              {isLoading ? <Loader2 className="h-5 w-5 animate-spin"/> : averageDuration !== null ? `${averageDuration} min` : 'N/A'}
+            </div>
+            <p className="text-xs text-muted-foreground">Average time per session</p>
           </CardContent>
         </Card>
       </div>
       
-      <Tabs defaultValue="recent-leads" className="w-full">
-        <TabsList>
-          <TabsTrigger value="recent-leads">Recent Leads</TabsTrigger>
-          <TabsTrigger value="integrations">Integrations</TabsTrigger>
-        </TabsList>
-        <TabsContent value="recent-leads" className="mt-6">
-          <Card>
-            <CardHeader>
-              <div className="flex items-center justify-between">
-                <CardTitle>Latest Leads</CardTitle>
-                <Link to="/leads">
-                  <Button variant="outline" size="sm">
-                    View All
-                    <ArrowUpRight className="h-4 w-4 ml-1" />
-                  </Button>
-                </Link>
+      {/* Charts Section - Leads & Conversations by Day and Countries */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        {/* Leads & Conversations Per Day Chart (2/3 width) */}
+        <Card className="lg:col-span-2">
+          <CardHeader>
+            <CardTitle>Leads & Conversations (Last 7 Days)</CardTitle>
+            <CardDescription>Daily activity over the past week</CardDescription>
+          </CardHeader>
+          <CardContent className="h-[300px] pl-2">
+            {isLoading ? (
+              <div className="flex justify-center items-center h-full"><Loader2 className="h-6 w-6 animate-spin"/></div>
+            ) : error ? (
+              <div className="flex justify-center items-center h-full text-destructive">Failed to load chart data.</div>
+            ) : (
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={dailyLeadsData}>
+                  <CartesianGrid strokeDasharray="3 3" vertical={false}/>
+                  <XAxis dataKey="name" fontSize={12} tickLine={false} axisLine={false}/>
+                  <YAxis fontSize={12} tickLine={false} axisLine={false} allowDecimals={false} />
+                  <Tooltip
+                    contentStyle={{ backgroundColor: 'hsl(var(--background))', border: '1px solid hsl(var(--border))', borderRadius: 'var(--radius)' }}
+                    labelStyle={{ color: 'hsl(var(--foreground))' }}
+                    itemStyle={{ color: 'hsl(var(--foreground))' }}
+                  />
+                  <Legend />
+                  <Bar dataKey="conversations" name="Conversations" fill="hsl(var(--primary))" radius={[4, 4, 0, 0]} />
+                  <Bar dataKey="leads" name="Leads" fill="hsl(var(--secondary))" radius={[4, 4, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            )}
+          </CardContent>
+        </Card>
+
+        {/* Region/Country Distribution (1/3 width) */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center">
+              <Globe className="h-4 w-4 mr-2" />
+              Visitor Regions
+            </CardTitle>
+            <CardDescription>Top visitor countries</CardDescription>
+          </CardHeader>
+          <CardContent className="h-[300px]">
+            {isLoading ? (
+              <div className="flex justify-center items-center h-full"><Loader2 className="h-6 w-6 animate-spin"/></div>
+            ) : countryData.length > 0 ? (
+              <ResponsiveContainer width="100%" height="100%">
+                <PieChart>
+                  <Pie
+                    data={countryData}
+                    cx="50%"
+                    cy="50%"
+                    labelLine={false}
+                    label={({ name, percent }) => `${name}: ${(percent * 100).toFixed(0)}%`}
+                    outerRadius={80}
+                    fill="#8884d8"
+                    dataKey="value"
+                  >
+                    {countryData.map((entry, index) => (
+                      <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+                    ))}
+                  </Pie>
+                  <Tooltip formatter={(value) => [value, 'Conversations']} />
+                </PieChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="flex justify-center items-center h-full text-muted-foreground">
+                No location data available
               </div>
-              <CardDescription>
-                Recent leads captured through your chatbot.
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              {isLoading ? (
-                <div className="text-center py-4">Loading...</div>
-              ) : leads.length === 0 ? (
-                <div className="text-center py-8 text-muted-foreground">
-                  No leads collected yet. Your captured leads will appear here.
-                </div>
-              ) : (
-                <div className="space-y-4">
-                  {leads.slice(0, 5).map((lead) => (
-                    <div key={lead.id} className="flex items-center justify-between border-b pb-4 last:border-0 last:pb-0">
-                      <div>
-                        <p className="font-medium">{lead.name}</p>
-                        <p className="text-sm text-muted-foreground">{lead.email}</p>
-                      </div>
-                      <div className="text-right">
-                        <p className="text-sm text-muted-foreground">
-                          {new Date(lead.createdAt).toLocaleDateString()}
-                        </p>
-                        <p className="text-xs bg-primary/10 text-primary rounded-full px-2 py-0.5 inline-block mt-1">
-                          {lead.interest}
-                        </p>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </CardContent>
-          </Card>
-        </TabsContent>
-        <TabsContent value="integrations" className="mt-6">
-          <Card>
-            <CardHeader>
-              <CardTitle>Integrations</CardTitle>
-              <CardDescription>
-                Connect your chatbot with other systems.
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
+            )}
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* Recent Activity Section */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {/* Recent Leads Card */}
+        <Card>
+          <CardHeader>
+            <div className="flex items-center justify-between">
+              <CardTitle>Latest Leads</CardTitle>
+              <Link to="/leads">
+                <Button variant="outline" size="sm">
+                  View All
+                  <ArrowUpRight className="h-4 w-4 ml-1" />
+                </Button>
+              </Link>
+            </div>
+            <CardDescription>
+              Most recent leads captured through the chatbot.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            {isLoading ? (
+              <div className="flex justify-center items-center py-8"><Loader2 className="h-6 w-6 animate-spin"/></div>
+            ) : recentLeads.length === 0 ? (
+              <div className="text-center py-8 text-muted-foreground">
+                No leads collected yet. Your captured leads will appear here.
+              </div>
+            ) : (
               <div className="space-y-4">
-                <div className="flex items-center justify-between border-b pb-4">
-                  <div className="flex items-center space-x-4">
-                    <div className="h-10 w-10 rounded-full bg-primary/10 flex items-center justify-center">
-                      <svg className="h-5 w-5 text-primary" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
-                        <rect width="256" height="256" fill="none" />
-                        <path d="M128,24A104,104,0,1,0,232,128,104.11,104.11,0,0,0,128,24Zm0,192a88,88,0,1,1,88-88A88.1,88.1,0,0,1,128,216Zm16-40a8,8,0,0,1-8,8H112a8,8,0,0,1-8-8V144H88a8,8,0,0,1-5.66-13.66l40-40a8,8,0,0,1,11.32,0l40,40A8,8,0,0,1,168,144H152Zm-8-24v16h-16V152Zm-36-8h20v-4.69L128,117.66l-8,8Z" />
-                      </svg>
-                    </div>
+                {recentLeads.map((lead) => (
+                  <div key={lead.id} className="flex items-center justify-between border-b pb-4 last:border-0 last:pb-0">
                     <div>
-                      <h4 className="font-medium">CRM Integration</h4>
-                      <p className="text-sm text-muted-foreground">Connect to your CRM to automatically sync leads</p>
+                      <p className="font-medium">{lead.name || 'N/A'}</p>
+                      <p className="text-sm text-muted-foreground">{lead.email || 'No Email'}</p>
+                    </div>
+                    <div className="text-right">
+                      <p className="text-sm text-muted-foreground">
+                        {lead.created_at ? new Date(lead.created_at).toLocaleDateString() : 'Unknown Date'}
+                      </p>
+                      {lead.interest && (
+                          <p className="text-xs bg-secondary text-secondary-foreground rounded-full px-2 py-0.5 inline-block mt-1 capitalize">
+                            {lead.interest.replace(/_/g, ' ')}
+                          </p>
+                      )}
+                      {lead.status && (
+                        <p className={`text-xs mt-1 capitalize ${lead.status === 'new' ? 'text-green-500' : ''}`}>
+                          {lead.status}
+                        </p>
+                      )}
                     </div>
                   </div>
-                  <Button variant="outline" size="sm">Connect</Button>
-                </div>
-                
-                <div className="flex items-center justify-between border-b pb-4">
-                  <div className="flex items-center space-x-4">
-                    <div className="h-10 w-10 rounded-full bg-primary/10 flex items-center justify-center">
-                      <svg className="h-5 w-5 text-primary" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
-                        <rect width="256" height="256" fill="none" />
-                        <path d="M224,48H32a8,8,0,0,0-8,8V192a16,16,0,0,0,16,16H216a16,16,0,0,0,16-16V56A8,8,0,0,0,224,48ZM203.43,176H52.57L90.23,128,104,144.43a16,16,0,0,0,24,0L142.23,128ZM216,192H171.69l-37.35-41.5,18.43-16.88a16,16,0,0,1,21.68,0ZM40,192V69.66l41.07,37.56L40,192Zm176-86.23L175,68h41Z" />
-                      </svg>
-                    </div>
-                    <div>
-                      <h4 className="font-medium">Email Integration</h4>
-                      <p className="text-sm text-muted-foreground">Get notified via email when new leads are captured</p>
-                    </div>
-                  </div>
-                  <Button variant="outline" size="sm">Connect</Button>
-                </div>
-                
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center space-x-4">
-                    <div className="h-10 w-10 rounded-full bg-primary/10 flex items-center justify-center">
-                      <svg className="h-5 w-5 text-primary" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
-                        <rect width="256" height="256" fill="none" />
-                        <path d="M172,120a44,44,0,1,1-44-44A44,44,0,0,1,172,120Zm60,8A104,104,0,1,1,128,24,104.11,104.11,0,0,1,232,128Zm-16,0a88,88,0,1,0-153.8,58.4A81.19,81.19,0,0,1,128,136a80.43,80.43,0,0,1,65.8,34.4A87.63,87.63,0,0,0,216,128Z" />
-                      </svg>
-                    </div>
-                    <div>
-                      <h4 className="font-medium">Zapier Integration</h4>
-                      <p className="text-sm text-muted-foreground">Connect to 3000+ apps via Zapier</p>
-                    </div>
-                  </div>
-                  <Button variant="outline" size="sm">Connect</Button>
-                </div>
+                ))}
               </div>
-            </CardContent>
-          </Card>
-        </TabsContent>
-      </Tabs>
+            )}
+          </CardContent>
+        </Card>
+
+        {/* Recent Conversations Card */}
+        <Card>
+          <CardHeader>
+            <div className="flex items-center justify-between">
+              <CardTitle>Latest Conversations</CardTitle>
+              <Link to="/conversations">
+                <Button variant="outline" size="sm">
+                  View All
+                  <ArrowUpRight className="h-4 w-4 ml-1" />
+                </Button>
+              </Link>
+            </div>
+            <CardDescription>
+              Most recent conversations started.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            {isLoading ? (
+              <div className="flex justify-center items-center py-8"><Loader2 className="h-6 w-6 animate-spin"/></div>
+            ) : recentConversations.length === 0 ? (
+              <div className="text-center py-8 text-muted-foreground">
+                No conversations started yet.
+              </div>
+            ) : (
+              <div className="space-y-4">
+                {recentConversations.map((conv) => (
+                  <div key={conv.id} className="flex items-center justify-between border-b pb-4 last:border-0 last:pb-0">
+                    <div>
+                      <p className="font-medium text-sm truncate" title={conv.id}>Conv ID: ...{conv.id.slice(-8)}</p>
+                      <p className="text-sm text-muted-foreground capitalize">Channel: {conv.channel || 'Unknown'}</p>
+                      <div className="flex text-xs text-muted-foreground space-x-2">
+                        <span>{conv.metadata?.userEmail || 'Anon'}</span>
+                        {conv.country_code && (
+                          <span title={conv.city || undefined}>📍 {conv.country_code}</span>
+                        )}
+                      </div>
+                    </div>
+                    <div className="text-right">
+                      <p className="text-sm text-muted-foreground">
+                        {conv.created_at ? new Date(conv.created_at).toLocaleDateString() : 'Unknown Date'}
+                      </p>
+                      <p className="text-xs text-muted-foreground">
+                         {conv.created_at ? new Date(conv.created_at).toLocaleTimeString([], { hour: '2-digit', minute:'2-digit' }) : ''}
+                      </p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      </div>
     </div>
   );
 };

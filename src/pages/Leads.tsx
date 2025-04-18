@@ -1,8 +1,9 @@
-
 import React, { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import LeadsTable from '@/components/Leads/LeadsTable';
 import { Lead } from '@/types';
-import { fetchLeads } from '@/services/mock-data';
+import { supabase } from '@/lib/supabaseClient';
+import { toast } from "sonner";
 import {
   Sheet,
   SheetContent,
@@ -18,13 +19,24 @@ const Leads = () => {
   const [isLoading, setIsLoading] = useState(true);
   const [selectedLead, setSelectedLead] = useState<Lead | null>(null);
   const [isSheetOpen, setIsSheetOpen] = useState(false);
+  const navigate = useNavigate();
 
   useEffect(() => {
     const loadLeads = async () => {
       setIsLoading(true);
       try {
-        const data = await fetchLeads();
-        setLeads(data);
+        const { data, error } = await supabase
+            .from('leads')
+            .select('*')
+            .order('created_at', { ascending: false });
+
+        if (error) {
+            console.error('Error fetching leads:', error);
+            toast.error(`Failed to load leads: ${error.message}`);
+            throw error;
+        }
+
+        setLeads(data as Lead[]);
       } catch (error) {
         console.error('Error loading leads:', error);
       } finally {
@@ -35,13 +47,35 @@ const Leads = () => {
     loadLeads();
   }, []);
 
+  const handleLeadUpdate = (updatedLead: Lead) => {
+    setLeads(prevLeads => 
+      prevLeads.map(lead => 
+        lead.id === updatedLead.id ? updatedLead : lead
+      )
+    );
+    if (selectedLead && selectedLead.id === updatedLead.id) {
+      setSelectedLead(updatedLead);
+    }
+  };
+
   const handleViewLead = (lead: Lead) => {
     setSelectedLead(lead);
     setIsSheetOpen(true);
   };
 
+  const handleNavigateToConversation = () => {
+    if (selectedLead?.conversation_id) {
+      console.log(`Navigating to conversation: /conversations/${selectedLead.conversation_id}`);
+      setIsSheetOpen(false);
+      navigate(`/conversations/${selectedLead.conversation_id}`);
+    } else {
+      toast.error("No conversation linked to this lead.");
+      console.warn("Attempted to navigate to conversation but conversation_id is missing for lead:", selectedLead?.id);
+    }
+  };
+
   const handleExportCSV = () => {
-    const headers = ['ID', 'Name', 'Email', 'Phone', 'Company', 'Interest', 'Source', 'Created'];
+    const headers = ['ID', 'Name', 'Email', 'Phone', 'Interest', 'Created'];
     const csvContent = [
       headers.join(','),
       ...leads.map(lead => [
@@ -49,10 +83,8 @@ const Leads = () => {
         lead.name || '-',
         lead.email || '-',
         lead.phone || '-',
-        lead.company || '-',
         lead.interest || '-',
-        lead.source,
-        new Date(lead.createdAt).toLocaleString()
+        new Date(lead.created_at).toLocaleString()
       ].join(','))
     ].join('\n');
     
@@ -96,6 +128,7 @@ const Leads = () => {
         <LeadsTable 
           leads={leads} 
           onViewLead={handleViewLead} 
+          onLeadUpdate={handleLeadUpdate}
         />
       )}
       
@@ -125,10 +158,6 @@ const Leads = () => {
                     <p className="text-sm font-medium">Phone</p>
                     <p>{selectedLead.phone || '-'}</p>
                   </div>
-                  <div>
-                    <p className="text-sm font-medium">Company</p>
-                    <p>{selectedLead.company || '-'}</p>
-                  </div>
                 </div>
               </div>
               
@@ -136,22 +165,29 @@ const Leads = () => {
                 <h3 className="text-sm font-medium text-muted-foreground mb-2">Additional Information</h3>
                 <div className="space-y-3">
                   <div>
+                    <p className="text-sm font-medium">Status</p>
+                    <p className="capitalize">{selectedLead.status || 'new'}</p>
+                  </div>
+                  <div>
                     <p className="text-sm font-medium">Interest</p>
                     <p className="capitalize">{selectedLead.interest || '-'}</p>
                   </div>
                   <div>
-                    <p className="text-sm font-medium">Source</p>
-                    <p className="capitalize">{selectedLead.source}</p>
-                  </div>
-                  <div>
                     <p className="text-sm font-medium">Date Created</p>
-                    <p>{formatDate(selectedLead.createdAt)}</p>
+                    <p>{formatDate(new Date(selectedLead.created_at))}</p>
                   </div>
                 </div>
               </div>
               
               <div className="border-t pt-4">
-                <Button className="w-full">View Conversation</Button>
+                <Button 
+                  className="w-full" 
+                  onClick={handleNavigateToConversation} 
+                  disabled={!selectedLead.conversation_id}
+                  variant={selectedLead.conversation_id ? "default" : "secondary"}
+                >
+                  {selectedLead.conversation_id ? "View Conversation" : "No Conversation Linked"}
+                </Button>
               </div>
             </div>
           )}

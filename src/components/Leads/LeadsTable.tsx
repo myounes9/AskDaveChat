@@ -1,6 +1,7 @@
-
-import React from 'react';
+import React, { useState } from 'react';
 import { Lead } from '@/types';
+import { supabase } from '@/lib/supabaseClient';
+import { toast } from "sonner";
 import {
   Table,
   TableBody,
@@ -12,15 +13,28 @@ import {
 } from "@/components/ui/table";
 import { Button } from '@/components/ui/button';
 import { Download, Eye } from 'lucide-react';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 
 interface LeadsTableProps {
   leads: Lead[];
   onViewLead?: (lead: Lead) => void;
+  onLeadUpdate?: (updatedLead: Lead) => void;
 }
 
-const LeadsTable: React.FC<LeadsTableProps> = ({ leads, onViewLead }) => {
-  const formatDate = (date: Date) => {
-    return new Date(date).toLocaleString('en-US', {
+const LEAD_STATUSES = ['new', 'contacted', 'qualified', 'disqualified', 'converted'];
+
+const LeadsTable: React.FC<LeadsTableProps> = ({ leads, onViewLead, onLeadUpdate }) => {
+  const [updatingStatus, setUpdatingStatus] = useState<Record<string, boolean>>({});
+
+  const formatDate = (dateString: string) => {
+    if (!dateString) return '-';
+    return new Date(dateString).toLocaleString('en-US', {
       month: 'short',
       day: 'numeric',
       year: 'numeric',
@@ -30,45 +44,40 @@ const LeadsTable: React.FC<LeadsTableProps> = ({ leads, onViewLead }) => {
     });
   };
 
-  const handleExportCSV = () => {
-    // Create CSV content
-    const headers = ['ID', 'Name', 'Email', 'Phone', 'Company', 'Interest', 'Source', 'Created'];
-    const csvContent = [
-      headers.join(','),
-      ...leads.map(lead => [
-        lead.id,
-        lead.name || '-',
-        lead.email || '-',
-        lead.phone || '-',
-        lead.company || '-',
-        lead.interest || '-',
-        lead.source,
-        formatDate(lead.createdAt)
-      ].join(','))
-    ].join('\n');
-    
-    // Create download link
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.setAttribute('href', url);
-    link.setAttribute('download', `leads_export_${new Date().toISOString().slice(0, 10)}.csv`);
-    link.style.visibility = 'hidden';
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+  const handleStatusChange = async (leadId: string, newStatus: string) => {
+    setUpdatingStatus(prev => ({ ...prev, [leadId]: true }));
+    try {
+      const { data, error } = await supabase
+        .from('leads')
+        .update({ status: newStatus })
+        .eq('id', leadId)
+        .select()
+        .single();
+
+      if (error) {
+        console.error("Error updating lead status:", error);
+        toast.error(`Failed to update status: ${error.message}`);
+        throw error;
+      }
+
+      if (data) {
+        toast.success(`Lead status updated to ${newStatus}`);
+        if (onLeadUpdate) {
+          onLeadUpdate(data as Lead);
+        }
+      } else {
+          toast.warning("Status updated, but failed to retrieve updated lead data.");
+      }
+
+    } catch (error) {
+        // Error already logged and toasted inside try block
+    } finally {
+      setUpdatingStatus(prev => ({ ...prev, [leadId]: false }));
+    }
   };
 
   return (
     <div className="space-y-4">
-      <div className="flex justify-between items-center">
-        <h2 className="text-2xl font-bold">Collected Leads</h2>
-        <Button onClick={handleExportCSV} variant="outline" size="sm">
-          <Download className="h-4 w-4 mr-2" />
-          Export CSV
-        </Button>
-      </div>
-      
       <Table>
         <TableCaption>A list of all leads collected through the chatbot.</TableCaption>
         <TableHeader>
@@ -77,29 +86,45 @@ const LeadsTable: React.FC<LeadsTableProps> = ({ leads, onViewLead }) => {
             <TableHead>Name</TableHead>
             <TableHead>Email</TableHead>
             <TableHead>Phone</TableHead>
-            <TableHead>Company</TableHead>
             <TableHead>Interest</TableHead>
-            <TableHead>Source</TableHead>
+            <TableHead>Status</TableHead>
             <TableHead className="text-right">Actions</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
           {leads.length === 0 ? (
             <TableRow>
-              <TableCell colSpan={8} className="text-center py-8 text-muted-foreground">
+              <TableCell colSpan={6} className="text-center py-8 text-muted-foreground">
                 No leads collected yet.
               </TableCell>
             </TableRow>
           ) : (
             leads.map((lead) => (
               <TableRow key={lead.id}>
-                <TableCell>{formatDate(lead.createdAt)}</TableCell>
+                <TableCell>{formatDate(lead.created_at)}</TableCell>
                 <TableCell>{lead.name || '-'}</TableCell>
                 <TableCell>{lead.email || '-'}</TableCell>
                 <TableCell>{lead.phone || '-'}</TableCell>
-                <TableCell>{lead.company || '-'}</TableCell>
                 <TableCell>{lead.interest || '-'}</TableCell>
-                <TableCell>{lead.source}</TableCell>
+                <TableCell>
+                  <Select 
+                    value={lead.status || 'new'} 
+                    onValueChange={(newStatus) => handleStatusChange(lead.id, newStatus)}
+                    disabled={updatingStatus[lead.id]}
+                  >
+                    <SelectTrigger className="w-[130px] h-8 text-xs capitalize">
+                      <SelectValue placeholder="Set status" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {LEAD_STATUSES.map(status => (
+                        <SelectItem key={status} value={status} className="text-xs capitalize">
+                          {status}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  {updatingStatus[lead.id] && <span className="text-xs ml-1 text-muted-foreground">...</span>}
+                </TableCell>
                 <TableCell className="text-right">
                   {onViewLead && (
                     <Button 
